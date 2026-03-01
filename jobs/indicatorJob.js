@@ -2,20 +2,15 @@ const cron = require("node-cron");
 const { PrismaClient } = require("@prisma/client");
 const calculateEMA = require("../utils/ema");
 const symbols = require("../config/symbols");
-
 const prisma = new PrismaClient();
 
 async function processIndicator(symbol) {
   try {
-    // 1️⃣ Get last 65 minutes of price data
+    // Get latest 60 candles
     const candles = await prisma.candle.findMany({
-      where: {
-        symbol,
-        timestamp: {
-          gte: new Date(Date.now() - 65 * 60 * 1000)
-        }
-      },
-      orderBy: { timestamp: "asc" }
+      where: { symbol },
+      orderBy: { timestamp: "desc" },
+      take: 60
     });
 
     if (candles.length < 50) {
@@ -23,25 +18,28 @@ async function processIndicator(symbol) {
       return;
     }
 
-    // 2️⃣ Use price instead of close
-    const prices = candles.map(c => c.price);
+    const ordered = candles.reverse();
+    const prices = ordered.map(c => c.price);
 
     const currentPrice = prices[prices.length - 1];
     const firstPrice = prices[0];
 
-    // 3️⃣ Calculate EMA 50
     const ema50 = calculateEMA(prices, 50);
 
-    // 4️⃣ Trend logic
+    if (!ema50) {
+      console.log(`⚠️ ${symbol}: EMA failed`);
+      return;
+    }
+
     const trend =
       currentPrice > ema50 ? "UPTREND" : "DOWNTREND";
 
-    // 5️⃣ 1-hour movement
     const priceChangePoint = currentPrice - firstPrice;
     const priceChangePercent =
-      (priceChangePoint / firstPrice) * 100;
+      firstPrice !== 0
+        ? (priceChangePoint / firstPrice) * 100
+        : 0;
 
-    // 6️⃣ Round to start of hour
     const now = new Date();
     const hourlyTimestamp = new Date(
       now.getFullYear(),
@@ -53,7 +51,6 @@ async function processIndicator(symbol) {
       0
     );
 
-    // 7️⃣ Upsert indicator
     await prisma.indicator.upsert({
       where: {
         symbol_timestamp: {
@@ -84,14 +81,19 @@ async function processIndicator(symbol) {
 }
 
 function startIndicatorJob() {
-  // Every hour at minute 0
-  cron.schedule("0 * * * *", async () => {
-    console.log("🚀 Starting Hourly Indicator Job");
+  cron.schedule(
+    "0 * * * *",
+    async () => {
+      console.log("🚀 Starting Hourly Indicator Job");
 
-    await Promise.allSettled(
-      symbols.map(symbol => processIndicator(symbol))
-    );
-  });
+      await Promise.allSettled(
+        symbols.map(symbol => processIndicator(symbol))
+      );
+    },
+    {
+      timezone: "Asia/Jakarta"
+    }
+  );
 }
 
 module.exports = startIndicatorJob;
